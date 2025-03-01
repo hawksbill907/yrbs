@@ -1,0 +1,443 @@
+---
+title: "0 - Raw Data Prepping"
+format: 
+  html:
+    standalone: true
+editor: visual
+---
+
+## Cleaning Statewide Traditional Master Data
+
+### Packages
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+
+# Load Packages using pacman
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  tidyr,      # for data tidying operations like 'spread' and 'gather'
+  haven,      # allows reading/writing of SPSS, Stata, and SAS files
+  dplyr,      # data manipulation operations, filter/mutate/select, etc
+  readxl,     # read data from Excel files (.xlsx and .xls)
+  openxlsx,   # reading/writing/editing Excel files without Java
+  survey,     # analysis of complex survey samples
+  srvyr,      # brings 'dplyr' syntax to survey stats from 'survey' pkg
+  stringr,    # consistent, simple tools to work with strings of chr
+  purrr,      # functional programming tools
+  labelled,   # to view labels
+  pollster    # to use three-way crosstabs
+)
+
+# Set global options
+options(scipen = 999) # avoid the use of scientific notation (e.g., 1e+03)
+
+
+# -97 value = Logic Check Fail
+# -98 = Out of Range Answer
+# -99 = Refused to Answer
+```
+
+### Raw RDA File of New 2023 data
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+
+# Load the .rda file
+load("statewide_trad_2023.rda")
+
+
+
+# Removed Label
+yrbs_master_2023_stwd <- state1
+```
+
+### QC - Logic Check Fails
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+#If there are many logic check fails (vale of -97) then the logic check logic needs to  be assessed. Please note any logic check fail percentage above 5% should be further investiagted. This could mean the logic behind the logic check is wrong, or the code is not working how anticipated, or it is overall a bad question.
+
+
+# Function to count -97 in a column (-97 means Logic Fail)
+count_logic_fails <- function(column) {
+  sum(column == -97, na.rm = TRUE)
+}
+
+
+
+# Function to count valid values excluding -99 (-99 means NA, refused, blank, etc)
+count_valid_values <- function(column) {
+  sum(column != -99 & !is.na(column))
+}
+
+
+
+# Select columns that start with "V" followed by 3 numbers, count -97, and calculate percentages
+logic_fails_counts <- yrbs_master_2023_stwd %>%
+  select(matches("^V\\d{3}$")) %>%
+  summarise(across(everything(), list(Fail_Count = count_logic_fails, Total_Valid = count_valid_values))) %>%
+  pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
+  separate(Column, into = c("Variable", "Metric"), sep = "_", extra = "merge") %>%
+  pivot_wider(names_from = Metric, values_from = Value) %>%
+  mutate(Percentage = round((Fail_Count / Total_Valid) * 100, 1),
+         Investigate = if_else(Percentage > 5, "Yes", "No")) %>%
+  filter(Fail_Count > 0) %>%
+  rename(ROI_Indicator_Code = Variable) %>%
+  arrange(desc(Percentage))
+
+
+
+# Display the result
+head(logic_fails_counts)
+
+```
+
+### Check/Add Any New ROI's (Responses of Interest) Needed
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+
+# List of columns you want to check
+columns_to_check <- c("V204R1", "V204R2", "QNBULR", "QNAKTOB3R")
+
+
+
+# Check if these columns are in the DataFrame
+columns_present <- columns_to_check %in% colnames(yrbs_master_2023_stwd)
+
+
+
+# head the result
+head(columns_present)
+
+
+
+# 204R2 was coded wrong, until fixed, need to recode here
+yrbs_master_2023_stwd <- yrbs_master_2023_stwd %>%
+  #Frequent use 20+ days per month vaping
+  mutate(V204R1 = case_when(V204 %in% c(6,7) ~ 1,
+                            V204 %in% c(1,2,3,4,5) ~ 2
+                                        )) %>%
+  #Daily use 30+ days per month vaping         
+  mutate(V204R2 = case_when(V204 == 7 ~ 1,
+                            V204 %in% c(1,2,3,4,5,6) ~ 2
+                                        )) %>%
+  # Add QNBULR  Bullied on school property & Electronically bullied
+  mutate(QNBULR = case_when(V223 == 1 ~ 1,
+                            V121 == 1 ~ 1,
+                            TRUE ~ 2  # If not yes above, than no
+                            )) %>%
+  # Add QNBULP  Not Bullied on school property & Not Electronically bullied
+  mutate(QNBULP = case_when(V223 == 2 ~ 1,
+                            V121 == 2 ~ 1,
+                            TRUE ~ 2  # If not yes above, than no
+                            )) %>%
+  # Used cigarettes, cigars, smokeless tobacco, Iqmik one+ days past 30 days
+  mutate(QNAKTOB3R = case_when(V030 %in% c(2,3,4,5,6,7) ~ 1,
+                               V038 %in% c(2,3,4,5,6,7) ~ 1,
+                               V226 %in% c(2,3,4,5,6,7) ~ 1,
+                               V193 %in% c(2,3,4,5,6,7) ~ 1,
+                               TRUE ~ 2  # If above not met than = 2
+                                ))
+                            
+
+
+# List of columns you want to check
+columns_to_check <- c("V204R1", "V204R2", "QNBULR", "QNAKTOB3R")
+
+
+
+# Check if these columns are in the DataFrame
+columns_present_again <- columns_to_check %in% colnames(yrbs_master_2023_stwd)
+
+
+
+# head the result
+head(columns_present_again)
+
+```
+
+### Delete Unnecessary Columns
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+
+# This removes the Pre-ROI columns containing the raw Vcode survey answers which are not utilized in our analysis (V010:V243)
+yrbs_master_2023_stwd <- yrbs_master_2023_stwd %>%
+  # -c means not include
+  select(-c(
+            'SEX', #not sure what this column is but not correct
+            'MONTHS', # Don't use age or age in months for analysis and 2023 data is missing age
+            'record', # do not need what record number the survey is - only needed during weighting
+            "Q5", # Useless
+            "Q6", # Useless
+            "usable", # No idea what this is
+            c(AGE.x:HPCT_97), # Don't need this now, will later
+            c(BMI:BMIPCT5), # BMI columns to create BMI percentiles
+            c(JUICE:VEGGIES), # Intermediate variable, don't need now
+            c(SODA:SSBSODA) # Intermediate variable, don't need now
+            ))
+
+
+
+# View the first few rows of the imported data
+head(yrbs_master_2023_stwd)
+
+```
+
+### Rename Columns - "Everyday Words"
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+# Rename columns so easier to understand what they mean for anyone. Can easily be changed back to numeric if needed.
+
+# Format: New Column Name = Current Column Name
+
+# Rename the columns
+yrbs_master_2023_stwd <- yrbs_master_2023_stwd %>%
+  rename(
+    Race_Group_8 = XRACEETH, # How AK does race calc, AI/AN Any mention
+    Race_Group_6 = XRACE_7, # split into 6 groups, AI/AN Any mention
+    Race_Group_4 = XRACE_5, # split into 4 groups, AI/AN Any mention
+    Race_Group_3 = XRACE_4N,#split into 3, AI/AN Any ment, Wht, Oth/Mult
+    Race_ANAI = XRACEAK, # AI/AK or not - any mention
+    Race_HispLat = V004, # Hispanic or Latino, or Not
+    Race_CDC = raceeth, # The way CDC does race, not any mention AI/AN
+    Race_Chosen = V005_Orig,
+    Sex = V002,
+    Grade = V003,
+    Age = V001,
+    Height_ft_in = V006_Orig,
+    Weight_lbs = V007_Orig,
+    Height_meters = V006,
+    Weight_kg = V007,
+    BMT_Percentile = BMIPCT,
+    Stratum = stratum, #The stratum they were designated
+    Primary_Samp_Unit = psu, # The Primary Sampling Unit
+    Final_Weight = weight # The wght given to students survey calc.
+    ) %>%
+  mutate(Survey_Year = "2023")
+
+
+
+# View the first few rows of the imported data
+head(yrbs_master_2023_stwd)
+
+```
+
+### Rearrange Columns
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+# Rearrange columns in desired order, organize the rest alphabetically
+
+yrbs_master_2023_stwd <- yrbs_master_2023_stwd %>%
+  select(
+    Survey_Year,
+    School_Type, #Traditional or Alternative
+    Age, # Age in years
+    Grade, # Grade 9-12
+    Sex, # Options Male or Female only
+    Height_ft_in, # First number is feet, the rest is inches
+    Weight_lbs, # Weight in pounds
+    Race_Group_8, # The way AK-YRBS does race calculations- ANAI any mention
+    Race_Group_6, # split into 6 Cat of race- ANAI any mention
+    Race_Group_4, # split into 4 Cat of race- ANAI any mention
+    Race_Group_3,  # split into 3 Cat race AI/AN, White, Other- ANAI any mention
+    Race_ANAI, # AI/AK or non - any mention
+    Race_HispLat, # Hispanic or Latino, or Non
+    Race_CDC, # All options of race split into 8, CDC's splits
+    Primary_Samp_Unit,
+    Stratum,
+    Final_Weight,
+    BMT_Percentile,
+    everything()
+  )
+
+
+
+# View the first few rows of the imported data
+head(yrbs_master_2023_stwd)
+
+```
+
+### Recode Refused/Missing/Unknown Data
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+# Change values of -99 or -97 meaning Refused/Missing/Unknown to Null for
+# columns that start with V or QN (all fo the indicator variables),
+# or contains RACE.
+
+
+# Create subgroup of Columns to select from
+subgroup_columns <- yrbs_master_2023_stwd %>%
+  select(matches("^(V|QN)|Race", ignore.case = TRUE)) %>%
+  names()
+
+
+
+yrbs_master_2023_stwd <- yrbs_master_2023_stwd %>%
+  mutate(across(all_of(subgroup_columns), ~ ifelse(. %in% c(-99,-98,-97), NA, .)))
+
+
+
+# View the first few rows of the imported data
+head(yrbs_master_2023_stwd)
+
+```
+
+### Recode Columns
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+#  Recode the data of these variables/calculated variables to be better
+# understood what they are or what they mean ** Need to add other columns in
+# future**. If any analysis needs a 0/1 or 1/2 value to calculate necessary
+# statistic, this can easily be coded into that section of code. This makes 
+# any one looking at our data, coworkers, data requests, don't need a data
+# dictionary open right next to it to understand the data.
+# In recode: 'old name' = 'new name'
+
+
+#Please note for Sex, the previous code before 2023 was 1 male, 2 female (Found during QC)
+
+
+# Convert to numeric to avoid character issues
+yrbs_master_2023_stwd <- yrbs_master_2023_stwd %>%
+  mutate(
+    Sex = as.numeric(Sex),
+    Grade = as.numeric(Grade),
+    Age = as.numeric(Age),
+    Race_Group_3 = as.numeric(Race_Group_3),
+    Race_Group_4 = as.numeric(Race_Group_4),
+    Race_Group_6 = as.numeric(Race_Group_6),
+    Race_Group_8 = as.numeric(Race_Group_8),
+    Race_CDC = as.numeric(Race_CDC),
+    Race_ANAI = as.numeric(Race_ANAI),
+    Race_HispLat = as.numeric(Race_HispLat)
+  )
+
+# Recode Sex (before 2023: 1=Male, 2=Female)
+yrbs_master_2023_stwd$Sex <- dplyr::recode(
+  yrbs_master_2023_stwd$Sex,
+  `1` = "Female",
+  `2` = "Male"
+)
+
+# Recode Grade
+yrbs_master_2023_stwd$Grade <- dplyr::recode(
+  yrbs_master_2023_stwd$Grade,
+  `1` = "9th",
+  `2` = "10th",
+  `3` = "11th",
+  `4` = "12th"
+)
+
+# Recode Age
+yrbs_master_2023_stwd$Age <- dplyr::recode(
+  yrbs_master_2023_stwd$Age,
+  `1` = "12",
+  `2` = "13",
+  `3` = "14",
+  `4` = "15",
+  `5` = "16",
+  `6` = "17",
+  `7` = "18+"
+)
+
+# Recode Race Groups
+yrbs_master_2023_stwd$Race_Group_3 <- dplyr::recode(
+  yrbs_master_2023_stwd$Race_Group_3,
+  `1` = "Alaska Native/American Indian",
+  `2` = "White",
+  `3` = "Other/Multiple"
+)
+
+yrbs_master_2023_stwd$Race_Group_4 <- dplyr::recode(
+  yrbs_master_2023_stwd$Race_Group_4,
+  `1` = "Alaska Native/American Indian",
+  `2` = "White",
+  `3` = "Hispanic/Latino",
+  `4` = "Other/Multiple"
+)
+
+yrbs_master_2023_stwd$Race_Group_6 <- dplyr::recode(
+  yrbs_master_2023_stwd$Race_Group_6,
+  `1` = "Alaska Native/American Indian",
+  `2` = "Black/African American",
+  `3` = "White",
+  `4` = "Hispanic/Latino",
+  `5` = "Other Races",
+  `6` = "Multiple Races"
+)
+
+yrbs_master_2023_stwd$Race_Group_8 <- dplyr::recode(
+  yrbs_master_2023_stwd$Race_Group_8,
+  `1` = "Alaska Native/American Indian",
+  `2` = "Asian",
+  `3` = "Black/African American",
+  `4` = "Native Haw/Other PI",
+  `5` = "White",
+  `6` = "Hispanic/Latino",
+  `7` = "Hisp/Lat Mult Race",
+  `8` = "Non Hisp/Lat Mult Race"
+)
+
+yrbs_master_2023_stwd$Race_CDC <- dplyr::recode(
+  yrbs_master_2023_stwd$Race_CDC,
+  `1` = "Alaska Native/American Indian",
+  `2` = "Asian",
+  `3` = "Black/African American",
+  `4` = "Native Haw/Other PI",
+  `5` = "White",
+  `6` = "Hispanic/Latino",
+  `7` = "Hisp/Lat Mult Race",
+  `8` = "Non Hisp/Lat Mult Race"
+)
+
+yrbs_master_2023_stwd$Race_ANAI <- dplyr::recode(
+  yrbs_master_2023_stwd$Race_ANAI,
+  `1` = "Alaska Native/American Indian",
+  `2` = "Non AN/AI"
+)
+
+yrbs_master_2023_stwd$Race_HispLat <- dplyr::recode(
+  yrbs_master_2023_stwd$Race_HispLat,
+  `1` = "Hispanic/Latino",
+  `2` = "Non Hisp/Lat"
+)
+
+
+# View the first few rows of the modified data
+head(yrbs_master_2023_stwd)
+```
+
+### Export Data
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+
+# Remove whitespcae
+remove_whitespace_from_all_columns <- function(df) {
+  df[] <- lapply(df, function(x) {
+    if (is.character(x)) {
+      return(trimws(x, which = "both"))
+    } else {
+      return(x)
+    }
+  })
+  return(df)
+}
+
+
+
+# Apply the function to your dataframe
+yrbs_master_2023_stwd <- remove_whitespace_from_all_columns(yrbs_master_2023_stwd)
+
+
+
+# General Cleaned Data
+write.csv(yrbs_master_2023_stwd, "raw_yrbs_master_statewide_trad_dataset_2023.xlsx")
+
+```
+
+### Export All Years of Data - SPSS with labels for Contractor
+
+```{r message = FALSE, warning = FALSE, eval="FALSE"}
+
+write_sav(yrbs_master_2023_stwd, "AK YRBS Statewide Traditional 2023.sav") # Export to SPSS
+
+```
