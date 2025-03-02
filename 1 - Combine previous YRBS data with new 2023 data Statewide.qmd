@@ -1,0 +1,274 @@
+---
+title: "1 - Combine Past to Present"
+format: html
+editor: visual
+---
+
+## Combine Past Data Set to Newest Data
+
+### Packages
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Load pacman (install if not available)
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+# Use pacman to load required packages
+pacman::p_load(
+  tidyr,      # for data tidying operations like 'spread' and 'gather'
+  dplyr,      # data manipulation operations, filter/mutate/select, etc
+  readxl,     # read data from Excel files (.xlsx and .xls)
+  openxlsx,   # reading/writing/editing Excel files without Java
+  stringr,    # consistent, simple tools to work with strings of chr
+  purrr,      # functional programming tools
+  labelled    # to view labels
+  # expss     # Uncomment if you need to apply labels and export data
+)
+
+# Set global options
+options(scipen = 999) # avoid the use of scientific notation (e.g., 1e+03)
+```
+
+### Update Legacy ROI's to Updated ROI's, combine data
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+merge_columns <- function(data, old_name, new_name) {
+  # Check if the old (legacy) column exists, if not, skip the merging process for this pair
+  if (!(old_name %in% colnames(data))) {
+    message(paste("Legacy column", old_name, "does not exist in the data. Skipping."))
+    return(data)
+  }
+  
+  
+  
+  # Check if the new (updated) column exists, if not, rename the old column to the new column name
+  if (!(new_name %in% colnames(data))) {
+    message(paste("Updated column", new_name, "does not exist in the data. Renaming and using legacy data."))
+    colnames(data)[colnames(data) == old_name] <- new_name
+    return(data)
+  }
+  
+  
+  
+  # For each row, if the value in the new column is NA, take the value from the old column
+  new_values <- data[[new_name]]
+  old_values <- data[[old_name]]
+  # Only update if new_values is NA and old_values is not NA
+  new_values[is.na(new_values)] <- old_values[is.na(new_values)]
+  
+  # Assign the merged values back to the new column in the dataframe
+  data[[new_name]] <- new_values
+  
+  # Remove the legacy column
+  data[[old_name]] <- NULL
+  
+  return(data)
+}
+
+
+
+# Load the master file
+master_data <- read.xlsx("raw_yrbs_master_statewide_trad_dataset_9519.xlsx")
+# Load the master file
+data_2023 <- read_excel("/Users/carlyadams/Documents/Applying for Jobs/Data Science Projects/YRBS Survey Data/Kaggle/raw_yrbs_master_statewide_trad_dataset_2023.xlsx")
+
+file.exists("raw_yrbs_master_statewide_trad_dataset_9519.xlsx")
+file.exists("raw_yrbs_master_statewide_trad_dataset_2023.xlsx")
+
+# List of columns to change and their new names.
+# Each sub-list contains two items: [legacy column name, updated column name].
+column_changes <- list(
+  c("QN133R", "QN043R"),     # QN133R is legacy, change to QN043R (updated)
+  c("QN133R1", "QN043R1"),   # QN133R1 is legacy, change to QN043R1 (updated)
+  c("QN133R2", "QN043R2"),   # QN133R2 is legacy, change to QN043R2 (updated)
+  c("QNBCP146P", "QNBCP198P"), # QNBCP146P is legacy, change to QNBCP198P (updated)
+  c("QNBCN064R", "QNBCN198R"), # QNBCN064R is legacy, change to QNBCN198R (updated)
+  c("QNBCN146R", "QNBCN198R"), # QNBCN146R is legacy, change to QNBCN198R (updated)
+  c("QN205R2", "QN263R2"),    # QN205R2 is legacy, change to QN263R2 (updated)
+  c("QN205R3", "QN263R3"),    # QN205R3 is legacy, change to QN263R3 (updated)
+  c("QN205R", "QN263R"),      # QN205R is legacy, change to QN263R (updated)
+  c("QN205R5", "QN263R5"),    # QN205R5 is legacy, change to QN263R5 (updated)
+  c("QN205R4", "QN263R4"),    # QN205R4 is legacy, change to QN263R4 (updated)
+  c("V011P", "V250P"),        # V011P is legacy, change to V250P (updated)
+  c("V202P", "V033P"),        # V202P is legacy, change to V033P (updated)
+  c("V214R", "V238R"),        # V214R is legacy, change to V238R (updated)
+  c("V011R", "V250R"),        # V011R is legacy, change to V250R (updated)
+  c("V240R2", "V262R2"),      # V240R2 is legacy, change to V262R2 (updated)
+  c("V240P1", "V262P1"),      # V240P1 is legacy, change to V262P1 (updated)
+  c("V240P2", "V262P2"),      # V240P2 is legacy, change to V262P2 (updated)
+  c("V240R1", "V262R1"),      # V240R1 is legacy, change to V262R1 (updated)
+  c("V132R", "V223R"),        # V132R is legacy, change to V223R (updated)
+  c("V110R", "V219R"),        # V110R is legacy, change to V219R (updated)
+  c("V132P", "V223P"),        # V132P is legacy, change to V223P (updated)
+  c("V200R2", "V261R2"),      # V200R2 is legacy, change to V261R2 (updated)
+  c("V200R1", "V261R1"),      # V200R1 is legacy, change to V261R1 (updated)
+  c("V200P1", "V261P1"),      # V200P1 is legacy, change to V261P1 (updated)
+  c("V200P2", "V261P2"),      # V200P2 is legacy, change to V261P2 (updated)
+  c("V036P", "V226P"),        # V036P is legacy, change to V226P (updated)
+  c("V036R", "V226R")         # V036R is legacy, change to V226R (updated)
+)
+
+
+
+# Apply the changes for each pair
+for (pair in column_changes) {
+  master_data <- merge_columns(master_data, pair[1], pair[2])
+}
+
+
+
+# Apply the changes for each pair
+for (pair in column_changes) {
+  data_2023 <- merge_columns(data_2023, pair[1], pair[2])
+}
+
+
+
+# QC Check
+if (!("V200P1" %in% colnames(master_data))) {
+  message("V200P1 is not in master_data.")
+} else {
+  message("V200P1 is present in master_data.")
+}
+
+
+
+# QC Check
+if (!("V097P1" %in% colnames(master_data))) {
+  message("V097P1 is not in master_data.")
+} else {
+  message("V097P1 is present in master_data.")
+}
+
+
+
+head(master_data)
+head(data_2023)
+
+
+# Save the updated data frame back to Excel if needed
+#write.xlsx(master_data, "raw_yrbs_master_statewide_trad_dataset_9519_trend_roi_changed.xlsx")
+#write.xlsx(data_2023, "raw_yrbs_master_statewide_trad_dataset_2023_trend_roi_changed.xlsx")
+
+```
+
+### Combine New and Old Data
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Ensure Survey_Year is numeric in both datasets
+master_data$Survey_Year <- as.numeric(as.character(master_data$Survey_Year))
+data_2023$Survey_Year <- as.numeric(as.character(data_2023$Survey_Year))
+
+master_data$Age <- as.numeric(as.character(master_data$Age))
+data_2023$Age <- as.numeric(as.character(data_2023$Age))
+
+master_data$Primary_Samp_Unit <- as.numeric(as.character(master_data$Primary_Samp_Unit))
+data_2023$Primary_Samp_Unit <- as.numeric(as.character(data_2023$Primary_Samp_Unit))
+
+master_data$Stratum <- as.numeric(as.character(master_data$Stratum))
+data_2023$Stratum <- as.numeric(as.character(data_2023$Stratum))
+
+master_data$Final_Weight <- as.numeric(as.character(master_data$Final_Weight))
+data_2023$Final_Weight <- as.numeric(as.character(data_2023$Final_Weight))
+
+master_data$Height_meters <- as.numeric(as.character(master_data$Height_meters))
+data_2023$Height_meters <- as.numeric(as.character(data_2023$Height_meters))
+
+master_data$Weight_kg <- as.numeric(as.character(master_data$Weight_kg))
+data_2023$Weight_kg <- as.numeric(as.character(data_2023$Weight_kg))
+
+master_data$Weight_lbs <- as.numeric(as.character(master_data$Weight_lbs))
+data_2023$Weight_lbs <- as.numeric(as.character(data_2023$Weight_lbs))
+
+master_data$BMT_Percentile <- as.numeric(as.character(master_data$BMT_Percentile))
+data_2023$BMT_Percentile <- as.numeric(as.character(data_2023$BMT_Percentile))
+
+# Convert specific columns in master_data
+master_data <- master_data %>%
+  mutate(across(matches("^V005."), ~ as.numeric(as.character(.))))
+
+# Convert specific columns in data_2023
+data_2023 <- data_2023 %>%
+  mutate(across(matches("^V005."), ~ as.numeric(as.character(.))))
+
+
+
+# Append the 2023 data to the master data
+combined_data <- bind_rows(master_data, data_2023)
+
+combined_data <- combined_data  %>% 
+  arrange(Survey_Year)
+
+
+
+# Save the combined data back to an Excel file
+write.xlsx(combined_data, "raw_yrbs_combined_trad_all.xlsx")
+
+
+
+head(combined_data)
+```
+
+### Remove Old ROI's - Not Useful
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Uoload excel file or use current df
+#pre_cleaned <- read.xlsx("raw_yrbs_combined_trad_all.xlsx")
+
+
+
+# Read the master questions inventory
+yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+
+# Filter out the ROI codes to remove and get a list of corresponding trimmed ROI_Indicator_Code values
+codes_to_remove <- yrbs_masterpiece %>%
+  filter(`ROI_Risk_or_Protective` == "Comment it out") %>%
+  pull(ROI_Indicator_Code) %>%
+  sapply(trimws)  # Apply trimws function to each code to remove leading/trailing spaces
+
+
+
+# Count the number of elements in codes_to_remove
+num_codes_to_remove <- length(codes_to_remove)
+head(num_codes_to_remove)
+head(codes_to_remove)
+
+
+
+# Clean up column names in cleaned_data
+colnames(pre_cleaned) <- trimws(colnames(pre_cleaned))  # Remove leading and trailing whitespaces
+
+
+
+# Check for discrepancies between column names in cleaned_data and codes_to_remove
+discrepancies <- setdiff(colnames(pre_cleaned), codes_to_remove)
+head(discrepancies)
+
+
+
+# Remove the columns specified in codes_to_remove
+# Subset the columns that are not in codes_to_remove
+cleaned_data <- pre_cleaned[, !colnames(pre_cleaned) %in% codes_to_remove]
+
+
+# Remove the column "V225P1" if it exists - QC revealed created wrong
+if ("V225P1" %in% colnames(cleaned_data)) {
+  cleaned_data <- select(cleaned_data, -V225P1)
+}
+
+
+
+# head or further process cleaned_data as needed
+head(cleaned_data)
+
+
+
+# Save the combined data back to an Excel file
+write.xlsx(cleaned_data, "raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+```
+
+### 
