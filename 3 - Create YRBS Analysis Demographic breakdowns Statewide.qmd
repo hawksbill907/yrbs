@@ -1,0 +1,3404 @@
+---
+title: "YRBS Analysis by Demographic"
+format: html
+editor: visual
+---
+
+## Packages
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Load Packages
+library(tidyr)      # for data tidying operations like 'spread' & 'gather'
+library(haven)      # allows reading and writing of SPSS, Stata, & SAS files
+library(dplyr)      # data manipulation operations, filter/mutate/select/etc.
+library(readxl)     # read data from Excel files (.xlsx and .xls)
+library(openxlsx)   # reading, writing, & editing Excel files without Java 
+library(survey)     # analysis of complex survey samples
+library(srvyr)      # brings 'dplyr' syntax to survey statistics from 'survey' pkg
+library(stringr)    # consistent, simple tools to work with strings of chr
+library(purrr)      # functional programming tools to simplify code
+
+
+options(scipen=999) # avoid the use of scientific notation (e.g., 1e+03) 
+options(survey.lonely.psu="adjust")
+options(survey.adjust.domain.lonely=TRUE)
+
+```
+
+### By Sex
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+# Function to perform the analysis
+perform_analysis <- function(gender, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Sex == gender)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Sex)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Sex, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Sex = gender) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Sex,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_Female"), perform_analysis("Female", year))
+  assign(paste0("all_var_columns", year, "_Male"), perform_analysis("Male", year))
+}
+
+
+
+head(all_var_columns2003_Female)
+head(all_var_columns2003_Male)
+head(all_var_columns2007_Female)
+head(all_var_columns2007_Male)
+head(all_var_columns2009_Female)
+head(all_var_columns2009_Male)
+head(all_var_columns2011_Female)
+head(all_var_columns2011_Male)
+head(all_var_columns2013_Female)
+head(all_var_columns2013_Male)
+head(all_var_columns2015_Female)
+head(all_var_columns2015_Male)
+head(all_var_columns2017_Female)
+head(all_var_columns2017_Male)
+head(all_var_columns2019_Female)
+head(all_var_columns2019_Male)
+head(all_var_columns2023_Female)
+head(all_var_columns2023_Male)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+  all_var_columns2003_Female,
+  all_var_columns2003_Male,
+  all_var_columns2007_Female,
+  all_var_columns2007_Male,
+  all_var_columns2009_Female,
+  all_var_columns2009_Male,
+  all_var_columns2011_Female,
+  all_var_columns2011_Male,
+  all_var_columns2013_Female,
+  all_var_columns2013_Male,
+  all_var_columns2015_Female,
+  all_var_columns2015_Male,
+  all_var_columns2017_Female,
+  all_var_columns2017_Male,
+  all_var_columns2019_Female,
+  all_var_columns2019_Male,
+  all_var_columns2023_Female,
+  all_var_columns2023_Male
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Sex) %>%
+  mutate(Trend_Grouping = "Sex") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         ) %>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Sex")
+addWorksheet(wb, "Sex Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Sex", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Sex Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+
+
+```
+
+### By Grade
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+
+
+# Function to perform the analysis
+perform_analysis <- function(grade, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Grade == grade)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Grade)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Grade, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Grade = grade) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Grade,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_9th"), perform_analysis("9th", year))
+  assign(paste0("all_var_columns", year, "_10th"), perform_analysis("10th", year))
+  assign(paste0("all_var_columns", year, "_11th"), perform_analysis("11th", year))
+  assign(paste0("all_var_columns", year, "_12th"), perform_analysis("12th", year))
+}
+
+
+
+head(all_var_columns2003_9th)
+head(all_var_columns2003_10th)
+head(all_var_columns2003_11th)
+head(all_var_columns2003_12th)
+
+head(all_var_columns2007_9th)
+head(all_var_columns2007_10th)
+head(all_var_columns2007_11th)
+head(all_var_columns2007_12th)
+
+head(all_var_columns2009_9th)
+head(all_var_columns2009_10th)
+head(all_var_columns2009_11th)
+head(all_var_columns2009_12th)
+
+head(all_var_columns2011_9th)
+head(all_var_columns2011_10th)
+head(all_var_columns2011_11th)
+head(all_var_columns2011_12th)
+
+head(all_var_columns2013_9th)
+head(all_var_columns2013_10th)
+head(all_var_columns2013_11th)
+head(all_var_columns2013_12th)
+
+head(all_var_columns2015_9th)
+head(all_var_columns2015_10th)
+head(all_var_columns2015_11th)
+head(all_var_columns2015_12th)
+
+head(all_var_columns2017_9th)
+head(all_var_columns2017_10th)
+head(all_var_columns2017_11th)
+head(all_var_columns2017_12th)
+
+head(all_var_columns2019_9th)
+head(all_var_columns2019_10th)
+head(all_var_columns2019_11th)
+head(all_var_columns2019_12th)
+
+head(all_var_columns2023_9th)
+head(all_var_columns2023_10th)
+head(all_var_columns2023_11th)
+head(all_var_columns2023_12th)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+all_var_columns2003_9th,
+all_var_columns2003_10th,
+all_var_columns2003_11th,
+all_var_columns2003_12th,
+
+all_var_columns2007_9th,
+all_var_columns2007_10th,
+all_var_columns2007_11th,
+all_var_columns2007_12th,
+
+all_var_columns2009_9th,
+all_var_columns2009_10th,
+all_var_columns2009_11th,
+all_var_columns2009_12th,
+
+all_var_columns2011_9th,
+all_var_columns2011_10th,
+all_var_columns2011_11th,
+all_var_columns2011_12th,
+
+all_var_columns2013_9th,
+all_var_columns2013_10th,
+all_var_columns2013_11th,
+all_var_columns2013_12th,
+
+all_var_columns2015_9th,
+all_var_columns2015_10th,
+all_var_columns2015_11th,
+all_var_columns2015_12th,
+
+all_var_columns2017_9th,
+all_var_columns2017_10th,
+all_var_columns2017_11th,
+all_var_columns2017_12th,
+
+all_var_columns2019_9th,
+all_var_columns2019_10th,
+all_var_columns2019_11th,
+all_var_columns2019_12th,
+
+all_var_columns2023_9th,
+all_var_columns2023_10th,
+all_var_columns2023_11th,
+all_var_columns2023_12th
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Grade) %>%
+  mutate(Trend_Grouping = "Grade") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         ) %>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Grade")
+addWorksheet(wb, "Grade Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Grade", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Grade Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+```
+
+### By Race_Group_3
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+# Function to perform the analysis
+perform_analysis <- function(race_group_3, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Race_Group_3 == race_group_3)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Race_Group_3)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Race_Group_3, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Race_Group_3 = race_group_3) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Race_Group_3,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_ANAI"), perform_analysis("Alaska Native/American Indian", year))
+  assign(paste0("all_var_columns", year, "_othermult"), perform_analysis("Other/Multiple", year))
+  assign(paste0("all_var_columns", year, "_white"), perform_analysis("White", year))
+}
+
+
+
+head(all_var_columns2003_ANAI)
+head(all_var_columns2003_othermult)
+head(all_var_columns2003_white)
+
+head(all_var_columns2007_ANAI)
+head(all_var_columns2007_othermult)
+head(all_var_columns2007_white)
+
+head(all_var_columns2009_ANAI)
+head(all_var_columns2009_othermult)
+head(all_var_columns2009_white)
+
+head(all_var_columns2011_ANAI)
+head(all_var_columns2011_othermult)
+head(all_var_columns2011_white)
+
+head(all_var_columns2013_ANAI)
+head(all_var_columns2013_othermult)
+head(all_var_columns2013_white)
+
+head(all_var_columns2015_ANAI)
+head(all_var_columns2015_othermult)
+head(all_var_columns2015_white)
+
+head(all_var_columns2017_ANAI)
+head(all_var_columns2017_othermult)
+head(all_var_columns2017_white)
+
+head(all_var_columns2019_ANAI)
+head(all_var_columns2019_othermult)
+head(all_var_columns2019_white)
+
+head(all_var_columns2023_ANAI)
+head(all_var_columns2023_othermult)
+head(all_var_columns2023_white)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+all_var_columns2003_ANAI,
+all_var_columns2003_othermult,
+all_var_columns2003_white,
+
+all_var_columns2007_ANAI,
+all_var_columns2007_othermult,
+all_var_columns2007_white,
+
+all_var_columns2009_ANAI,
+all_var_columns2009_othermult,
+all_var_columns2009_white,
+
+all_var_columns2011_ANAI,
+all_var_columns2011_othermult,
+all_var_columns2011_white,
+
+all_var_columns2013_ANAI,
+all_var_columns2013_othermult,
+all_var_columns2013_white,
+
+all_var_columns2015_ANAI,
+all_var_columns2015_othermult,
+all_var_columns2015_white,
+
+all_var_columns2017_ANAI,
+all_var_columns2017_othermult,
+all_var_columns2017_white,
+
+all_var_columns2019_ANAI,
+all_var_columns2019_othermult,
+all_var_columns2019_white,
+
+all_var_columns2023_ANAI,
+all_var_columns2023_othermult,
+all_var_columns2023_white
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Race_Group_3) %>%
+  mutate(Trend_Grouping = "Race_Group_3") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         ) %>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Race_Group_3")
+addWorksheet(wb, "Race_Group_3 Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Race_Group_3", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Race_Group_3 Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+
+```
+
+### By Race_Group_4
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+# Function to perform the analysis
+perform_analysis <- function(race_group_4, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Race_Group_4 == race_group_4)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Race_Group_4)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Race_Group_4, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Race_Group_4 = race_group_4) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Race_Group_4,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_ANAI"), perform_analysis("Alaska Native/American Indian", year))
+  assign(paste0("all_var_columns", year, "_othermult"), perform_analysis("Other/Multiple", year))
+  assign(paste0("all_var_columns", year, "_white"), perform_analysis("White", year))
+  assign(paste0("all_var_columns", year, "_hisplat"), perform_analysis("Hispanic/Latino", year))
+}
+
+
+
+head(all_var_columns2003_ANAI)
+head(all_var_columns2003_othermult)
+head(all_var_columns2003_white)
+head(all_var_columns2003_hisplat)
+
+head(all_var_columns2007_ANAI)
+head(all_var_columns2007_othermult)
+head(all_var_columns2007_white)
+head(all_var_columns2007_hisplat)
+
+head(all_var_columns2009_ANAI)
+head(all_var_columns2009_othermult)
+head(all_var_columns2009_white)
+head(all_var_columns2009_hisplat)
+
+head(all_var_columns2011_ANAI)
+head(all_var_columns2011_othermult)
+head(all_var_columns2011_white)
+head(all_var_columns2011_hisplat)
+
+head(all_var_columns2013_ANAI)
+head(all_var_columns2013_othermult)
+head(all_var_columns2013_white)
+head(all_var_columns2013_hisplat)
+
+head(all_var_columns2015_ANAI)
+head(all_var_columns2015_othermult)
+head(all_var_columns2015_white)
+head(all_var_columns2015_hisplat)
+
+head(all_var_columns2017_ANAI)
+head(all_var_columns2017_othermult)
+head(all_var_columns2017_white)
+head(all_var_columns2017_hisplat)
+
+head(all_var_columns2019_ANAI)
+head(all_var_columns2019_othermult)
+head(all_var_columns2019_white)
+head(all_var_columns2019_hisplat)
+
+head(all_var_columns2023_ANAI)
+head(all_var_columns2023_othermult)
+head(all_var_columns2023_white)
+head(all_var_columns2023_hisplat)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+all_var_columns2003_ANAI,
+all_var_columns2003_othermult,
+all_var_columns2003_white,
+all_var_columns2003_hisplat,
+
+all_var_columns2007_ANAI,
+all_var_columns2007_othermult,
+all_var_columns2007_white,
+all_var_columns2007_hisplat,
+
+all_var_columns2009_ANAI,
+all_var_columns2009_othermult,
+all_var_columns2009_white,
+all_var_columns2009_hisplat,
+
+all_var_columns2011_ANAI,
+all_var_columns2011_othermult,
+all_var_columns2011_white,
+all_var_columns2011_hisplat,
+
+all_var_columns2013_ANAI,
+all_var_columns2013_othermult,
+all_var_columns2013_white,
+all_var_columns2013_hisplat,
+
+all_var_columns2015_ANAI,
+all_var_columns2015_othermult,
+all_var_columns2015_white,
+all_var_columns2015_hisplat,
+
+all_var_columns2017_ANAI,
+all_var_columns2017_othermult,
+all_var_columns2017_white,
+all_var_columns2017_hisplat,
+
+all_var_columns2019_ANAI,
+all_var_columns2019_othermult,
+all_var_columns2019_white,
+all_var_columns2019_hisplat,
+
+all_var_columns2023_ANAI,
+all_var_columns2023_othermult,
+all_var_columns2023_white,
+all_var_columns2023_hisplat
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Race_Group_4) %>%
+  mutate(Trend_Grouping = "Race_Group_4") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         )%>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Race_Group_4")
+addWorksheet(wb, "Race_Group_4 Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Race_Group_4", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Race_Group_4 Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+
+```
+
+### By Race_Group_6
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+# Function to perform the analysis
+perform_analysis <- function(race_group_6, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Race_Group_6 == race_group_6)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Race_Group_6)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Race_Group_6, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Race_Group_6 = race_group_6) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Race_Group_6,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_ANAI"), 
+         perform_analysis("Alaska Native/American Indian", year))
+  assign(paste0("all_var_columns", year, "_blkaa"), 
+         perform_analysis("Black/African American", year))
+  assign(paste0("all_var_columns", year, "_white"), 
+         perform_analysis("White", year))
+  assign(paste0("all_var_columns", year, "_multrace"), 
+         perform_analysis("Multiple Races", year))
+  assign(paste0("all_var_columns", year, "_hisplat"), 
+         perform_analysis("Hispanic/Latino", year))
+  assign(paste0("all_var_columns", year, "_otherrace"),
+         perform_analysis("Other Races", year))
+}
+
+
+
+head(all_var_columns2003_ANAI)
+head(all_var_columns2003_blkaa)
+head(all_var_columns2003_white)
+head(all_var_columns2003_multrace)
+head(all_var_columns2003_hisplat)
+head(all_var_columns2003_otherrace)
+
+head(all_var_columns2007_ANAI)
+head(all_var_columns2007_blkaa)
+head(all_var_columns2007_white)
+head(all_var_columns2007_multrace)
+head(all_var_columns2007_hisplat)
+head(all_var_columns2007_otherrace)
+
+head(all_var_columns2009_ANAI)
+head(all_var_columns2009_blkaa)
+head(all_var_columns2009_white)
+head(all_var_columns2009_multrace)
+head(all_var_columns2009_hisplat)
+head(all_var_columns2009_otherrace)
+
+head(all_var_columns2011_ANAI)
+head(all_var_columns2011_blkaa)
+head(all_var_columns2011_white)
+head(all_var_columns2011_multrace)
+head(all_var_columns2011_hisplat)
+head(all_var_columns2011_otherrace)
+
+head(all_var_columns2013_ANAI)
+head(all_var_columns2013_blkaa)
+head(all_var_columns2013_white)
+head(all_var_columns2013_multrace)
+head(all_var_columns2013_hisplat)
+head(all_var_columns2013_otherrace)
+
+head(all_var_columns2015_ANAI)
+head(all_var_columns2015_blkaa)
+head(all_var_columns2015_white)
+head(all_var_columns2015_multrace)
+head(all_var_columns2015_hisplat)
+head(all_var_columns2015_otherrace)
+
+head(all_var_columns2017_ANAI)
+head(all_var_columns2017_blkaa)
+head(all_var_columns2017_white)
+head(all_var_columns2017_multrace)
+head(all_var_columns2017_hisplat)
+head(all_var_columns2017_otherrace)
+
+head(all_var_columns2019_ANAI)
+head(all_var_columns2019_blkaa)
+head(all_var_columns2019_white)
+head(all_var_columns2019_multrace)
+head(all_var_columns2019_hisplat)
+head(all_var_columns2019_otherrace)
+
+head(all_var_columns2023_ANAI)
+head(all_var_columns2023_blkaa)
+head(all_var_columns2023_white)
+head(all_var_columns2023_multrace)
+head(all_var_columns2023_hisplat)
+head(all_var_columns2023_otherrace)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+all_var_columns2003_ANAI,
+all_var_columns2003_blkaa,
+all_var_columns2003_white,
+all_var_columns2003_multrace,
+all_var_columns2003_hisplat,
+all_var_columns2003_otherrace,
+
+all_var_columns2007_ANAI,
+all_var_columns2007_blkaa,
+all_var_columns2007_white,
+all_var_columns2007_multrace,
+all_var_columns2007_hisplat,
+all_var_columns2007_otherrace,
+
+all_var_columns2009_ANAI,
+all_var_columns2009_blkaa,
+all_var_columns2009_white,
+all_var_columns2009_multrace,
+all_var_columns2009_hisplat,
+all_var_columns2009_otherrace,
+
+all_var_columns2011_ANAI,
+all_var_columns2011_blkaa,
+all_var_columns2011_white,
+all_var_columns2011_multrace,
+all_var_columns2011_hisplat,
+all_var_columns2011_otherrace,
+
+all_var_columns2013_ANAI,
+all_var_columns2013_blkaa,
+all_var_columns2013_white,
+all_var_columns2013_multrace,
+all_var_columns2013_hisplat,
+all_var_columns2013_otherrace,
+
+all_var_columns2015_ANAI,
+all_var_columns2015_blkaa,
+all_var_columns2015_white,
+all_var_columns2015_multrace,
+all_var_columns2015_hisplat,
+all_var_columns2015_otherrace,
+
+all_var_columns2017_ANAI,
+all_var_columns2017_blkaa,
+all_var_columns2017_white,
+all_var_columns2017_multrace,
+all_var_columns2017_hisplat,
+all_var_columns2017_otherrace,
+
+all_var_columns2019_ANAI,
+all_var_columns2019_blkaa,
+all_var_columns2019_white,
+all_var_columns2019_multrace,
+all_var_columns2019_hisplat,
+all_var_columns2019_otherrace,
+
+all_var_columns2023_ANAI,
+all_var_columns2023_blkaa,
+all_var_columns2023_white,
+all_var_columns2023_multrace,
+all_var_columns2023_hisplat,
+all_var_columns2023_otherrace
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Race_Group_6) %>%
+  mutate(Trend_Grouping = "Race_Group_6") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         )%>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Race_Group_6")
+addWorksheet(wb, "Race_Group_6 Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Race_Group_6", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Race_Group_6 Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+```
+
+### By Race_Group_8
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+# Function to perform the analysis
+perform_analysis <- function(race_group_8, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Race_Group_8 == race_group_8)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Race_Group_8)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Race_Group_8, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Race_Group_8 = race_group_8) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Race_Group_8,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_ANAI"), 
+         perform_analysis("Alaska Native/American Indian", year))
+  assign(paste0("all_var_columns", year, "_blkaa"), 
+         perform_analysis("Black/African American", year))
+  assign(paste0("all_var_columns", year, "_white"), 
+         perform_analysis("White", year))
+  assign(paste0("all_var_columns", year, "_asian"), 
+         perform_analysis("Asian", year))
+  assign(paste0("all_var_columns", year, "_hisplat"), 
+         perform_analysis("Hispanic/Latino", year))
+  assign(paste0("all_var_columns", year, "_hisplatmult"),
+         perform_analysis("Hisp/Lat Mult Race", year))
+  assign(paste0("all_var_columns", year, "_nwopi"),
+         perform_analysis("Native Haw/Other PI", year))
+  assign(paste0("all_var_columns", year, "_nonhisplatmult"),
+         perform_analysis("Non Hisp/Lat Mult Race", year))
+}
+
+
+
+head(all_var_columns2003_ANAI)
+head(all_var_columns2003_blkaa)
+head(all_var_columns2003_asian)
+head(all_var_columns2003_hisplat)
+head(all_var_columns2003_hisplatmult)
+head(all_var_columns2003_nwopi)
+head(all_var_columns2003_nonhisplatmult)
+head(all_var_columns2003_white)
+
+head(all_var_columns2007_ANAI)
+head(all_var_columns2007_blkaa)
+head(all_var_columns2007_asian)
+head(all_var_columns2007_hisplat)
+head(all_var_columns2007_hisplatmult)
+head(all_var_columns2007_nwopi)
+head(all_var_columns2007_nonhisplatmult)
+head(all_var_columns2007_white)
+
+head(all_var_columns2009_ANAI)
+head(all_var_columns2009_blkaa)
+head(all_var_columns2009_asian)
+head(all_var_columns2009_hisplat)
+head(all_var_columns2009_hisplatmult)
+head(all_var_columns2009_nwopi)
+head(all_var_columns2009_nonhisplatmult)
+head(all_var_columns2009_white)
+
+head(all_var_columns2011_ANAI)
+head(all_var_columns2011_blkaa)
+head(all_var_columns2011_asian)
+head(all_var_columns2011_hisplat)
+head(all_var_columns2011_hisplatmult)
+head(all_var_columns2011_nwopi)
+head(all_var_columns2011_nonhisplatmult)
+head(all_var_columns2011_white)
+
+head(all_var_columns2013_ANAI)
+head(all_var_columns2013_blkaa)
+head(all_var_columns2013_asian)
+head(all_var_columns2013_hisplat)
+head(all_var_columns2013_hisplatmult)
+head(all_var_columns2013_nwopi)
+head(all_var_columns2013_nonhisplatmult)
+head(all_var_columns2013_white)
+
+head(all_var_columns2015_ANAI)
+head(all_var_columns2015_blkaa)
+head(all_var_columns2015_asian)
+head(all_var_columns2015_hisplat)
+head(all_var_columns2015_hisplatmult)
+head(all_var_columns2015_nwopi)
+head(all_var_columns2015_nonhisplatmult)
+head(all_var_columns2015_white)
+
+head(all_var_columns2017_ANAI)
+head(all_var_columns2017_blkaa)
+head(all_var_columns2017_asian)
+head(all_var_columns2017_hisplat)
+head(all_var_columns2017_hisplatmult)
+head(all_var_columns2017_nwopi)
+head(all_var_columns2017_nonhisplatmult)
+head(all_var_columns2017_white)
+
+head(all_var_columns2019_ANAI)
+head(all_var_columns2019_blkaa)
+head(all_var_columns2019_asian)
+head(all_var_columns2019_hisplat)
+head(all_var_columns2019_hisplatmult)
+head(all_var_columns2019_nwopi)
+head(all_var_columns2019_nonhisplatmult)
+head(all_var_columns2019_white)
+
+head(all_var_columns2023_ANAI)
+head(all_var_columns2023_blkaa)
+head(all_var_columns2023_asian)
+head(all_var_columns2023_hisplat)
+head(all_var_columns2023_hisplatmult)
+head(all_var_columns2023_nwopi)
+head(all_var_columns2023_nonhisplatmult)
+head(all_var_columns2023_white)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+all_var_columns2003_ANAI,
+all_var_columns2003_blkaa,
+all_var_columns2003_asian,
+all_var_columns2003_hisplat,
+all_var_columns2003_hisplatmult,
+all_var_columns2003_nwopi,
+all_var_columns2003_nonhisplatmult,
+all_var_columns2003_white,
+
+all_var_columns2007_ANAI,
+all_var_columns2007_blkaa,
+all_var_columns2007_asian,
+all_var_columns2007_hisplat,
+all_var_columns2007_hisplatmult,
+all_var_columns2007_nwopi,
+all_var_columns2007_nonhisplatmult,
+all_var_columns2007_white,
+
+all_var_columns2009_ANAI,
+all_var_columns2009_blkaa,
+all_var_columns2009_asian,
+all_var_columns2009_hisplat,
+all_var_columns2009_hisplatmult,
+all_var_columns2009_nwopi,
+all_var_columns2009_nonhisplatmult,
+all_var_columns2009_white,
+
+all_var_columns2011_ANAI,
+all_var_columns2011_blkaa,
+all_var_columns2011_asian,
+all_var_columns2011_hisplat,
+all_var_columns2011_hisplatmult,
+all_var_columns2011_nwopi,
+all_var_columns2011_nonhisplatmult,
+all_var_columns2011_white,
+
+all_var_columns2013_ANAI,
+all_var_columns2013_blkaa,
+all_var_columns2013_asian,
+all_var_columns2013_hisplat,
+all_var_columns2013_hisplatmult,
+all_var_columns2013_nwopi,
+all_var_columns2013_nonhisplatmult,
+all_var_columns2013_white,
+
+all_var_columns2015_ANAI,
+all_var_columns2015_blkaa,
+all_var_columns2015_asian,
+all_var_columns2015_hisplat,
+all_var_columns2015_hisplatmult,
+all_var_columns2015_nwopi,
+all_var_columns2015_nonhisplatmult,
+all_var_columns2015_white,
+
+all_var_columns2017_ANAI,
+all_var_columns2017_blkaa,
+all_var_columns2017_asian,
+all_var_columns2017_hisplat,
+all_var_columns2017_hisplatmult,
+all_var_columns2017_nwopi,
+all_var_columns2017_nonhisplatmult,
+all_var_columns2017_white,
+
+all_var_columns2019_ANAI,
+all_var_columns2019_blkaa,
+all_var_columns2019_asian,
+all_var_columns2019_hisplat,
+all_var_columns2019_hisplatmult,
+all_var_columns2019_nwopi,
+all_var_columns2019_nonhisplatmult,
+all_var_columns2019_white,
+
+all_var_columns2023_ANAI,
+all_var_columns2023_blkaa,
+all_var_columns2023_asian,
+all_var_columns2023_hisplat,
+all_var_columns2023_hisplatmult,
+all_var_columns2023_nwopi,
+all_var_columns2023_nonhisplatmult,
+all_var_columns2023_white
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Race_Group_8) %>%
+  mutate(Trend_Grouping = "Race_Group_8") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         )%>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Race_Group_8")
+addWorksheet(wb, "Race_Group_8 Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Race_Group_8", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Race_Group_8 Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+```
+
+### By Race_ANAI
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+# Function to perform the analysis
+perform_analysis <- function(race_anai, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Race_ANAI == race_anai)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Race_ANAI)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Race_ANAI, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Race_ANAI = race_anai) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Race_ANAI,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_ANAI"), perform_analysis("Alaska Native/American Indian", year))
+  assign(paste0("all_var_columns", year, "_nonANAI"), perform_analysis("Non AN/AI", year))
+}
+
+
+
+head(all_var_columns2003_ANAI)
+head(all_var_columns2003_nonANAI)
+
+head(all_var_columns2007_ANAI)
+head(all_var_columns2007_nonANAI)
+
+head(all_var_columns2009_ANAI)
+head(all_var_columns2009_nonANAI)
+
+head(all_var_columns2011_ANAI)
+head(all_var_columns2011_nonANAI)
+
+head(all_var_columns2013_ANAI)
+head(all_var_columns2013_nonANAI)
+
+head(all_var_columns2015_ANAI)
+head(all_var_columns2015_nonANAI)
+
+head(all_var_columns2017_ANAI)
+head(all_var_columns2017_nonANAI)
+
+head(all_var_columns2019_ANAI)
+head(all_var_columns2019_nonANAI)
+
+head(all_var_columns2023_ANAI)
+head(all_var_columns2023_nonANAI)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+all_var_columns2003_ANAI,
+all_var_columns2003_nonANAI,
+
+all_var_columns2007_ANAI,
+all_var_columns2007_nonANAI,
+
+all_var_columns2009_ANAI,
+all_var_columns2009_nonANAI,
+
+all_var_columns2011_ANAI,
+all_var_columns2011_nonANAI,
+
+all_var_columns2013_ANAI,
+all_var_columns2013_nonANAI,
+
+all_var_columns2015_ANAI,
+all_var_columns2015_nonANAI,
+
+all_var_columns2017_ANAI,
+all_var_columns2017_nonANAI,
+
+all_var_columns2019_ANAI,
+all_var_columns2019_nonANAI,
+
+all_var_columns2023_ANAI,
+all_var_columns2023_nonANAI,
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Race_ANAI) %>%
+  mutate(Trend_Grouping = "Race_ANAI") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         ) %>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Race_ANAI")
+addWorksheet(wb, "Race_ANAI Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Race_ANAI", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Race_ANAI Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+```
+
+### By Race_HispLat
+
+```{r message = FALSE, warning = FALSE, eval=FALSE}
+
+# Function to safely convert to numeric and handle NAs
+safe_as_numeric <- function(x) {
+  if (is.character(x) && x == "Suppressed") {
+    return(NA)
+  } else {
+    suppressWarnings(as.numeric(x))
+  }
+}
+
+# Suppression function
+suppress_values <- function(df) {
+  df %>%
+    mutate(
+      Unweighted_Numerator = if_else(safe_as_numeric(Unweighted_Numerator) < 5 & !is.na(safe_as_numeric(Unweighted_Numerator)), "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(safe_as_numeric(Unweighted_Denominator) < 30 & !is.na(safe_as_numeric(Unweighted_Denominator)), "Suppressed", as.character(Unweighted_Denominator)),
+      Unweighted_Denominator = if_else(Unweighted_Numerator == "Suppressed", "Suppressed", Unweighted_Denominator),
+      Prevalence_Estimate = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Prevalence_Estimate)),
+      Confidence_Interval_Low = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Confidence_Interval_High)),
+      Relative_Standard_Error = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Unweighted_Numerator == "Suppressed" | Unweighted_Denominator == "Suppressed", "Suppressed", as.character(RSE_Flag))
+    ) %>%
+    mutate(
+      Prevalence_Estimate = case_when(
+        Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+        !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+        TRUE ~ Prevalence_Estimate
+      ),
+      Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+      Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+      Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+      Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+      Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+      RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+    )
+}
+
+# Read the data
+yrbs_master_analysis <- read.xlsx("raw_yrbs_allyears_statewide_trad_cleaned.xlsx")
+
+# Function to perform the analysis
+perform_analysis <- function(race_hisplat, year) {
+  # Filter the data
+  filtered_data <- yrbs_master_analysis %>%
+    filter(Survey_Year == year,
+           School_Type == "Statewide Traditional",
+           Race_HispLat == race_hisplat)
+  
+  # Get column names that match the pattern
+  pattern_cols <- names(filtered_data)[grepl("^(QN|V).*[RP]", names(filtered_data))]
+  
+  # Define a function to check if a column contains 1 or 2
+  contains_1_or_2 <- function(column) {
+    any(column %in% c(1, 2))
+  }
+  
+  # Identify columns to remove
+  cols_to_remove <- sapply(filtered_data[pattern_cols], function(col) !contains_1_or_2(col))
+  cols_to_remove <- pattern_cols[cols_to_remove]
+  
+  # Remove the identified columns
+  filtered_data <- select(filtered_data, -all_of(cols_to_remove))
+  
+  # Remove whitespace
+  remove_whitespace_from_all_columns <- function(df) {
+    df[] <- lapply(df, function(x) {
+      if (is.character(x)) {
+        return(trimws(x, which = "both"))
+      } else {
+        return(x)
+      }
+    })
+    return(df)
+  }
+  
+  # Apply the function to your dataframe
+  filtered_data <- remove_whitespace_from_all_columns(filtered_data)
+  
+  # Create Survey Design Object
+  survey_design <- filtered_data %>% 
+    as_survey_design(ids = Primary_Samp_Unit,
+                     strata = Stratum,
+                     weights = Final_Weight,
+                     nest = TRUE)
+  
+  # Create Function with Survey Design Object
+  svy_multi_est_fun <- function(year = NULL, elements = NULL, school_type = NULL, design = NULL) {
+    survey_design_all_var <- design %>%
+      filter(!is.na(get(elements)),
+             (!is.na(Race_HispLat)),
+             Survey_Year == year,
+             School_Type == school_type) %>% 
+      group_by(Race_HispLat, get(elements)) %>% 
+      summarize(
+        unweighted_numerator_1 = sum(get(elements) == 1, na.rm = TRUE),
+        unweighted_numerator_2 = sum(get(elements) == 2, na.rm = TRUE),
+        wt.mean = round(survey_mean(proportion = TRUE, 
+                                    prop_method = 'logit',
+                                    vartype = 'ci'),
+                        digits = 3)
+      ) %>%
+      rename_with(.cols = 1, ~ "ROI_Indicator_Code") %>% 
+      mutate(ROI_Indicator_Code = elements)
+    
+    cbind(
+      Year = year,
+      School_Type = school_type,
+      survey_design_all_var)
+  }
+  
+  # Empty dataframe to store results
+  all_var_columns <- data.frame()
+  
+  # Parameters
+  stype <- "Statewide Traditional"
+  
+  # For loop for analysis
+  for (j in c(names(survey_design$variables %>%
+                    select(matches("^(QN|V).*[RP]"))))) {
+    all_var_columns <- rbind(svy_multi_est_fun(
+      year = year,
+      school_type = stype,
+      elements = j,
+      design = survey_design),
+      all_var_columns)
+  }
+  
+  # Read the specific sheet from the Excel file
+  yrbs_masterpiece <- read.xlsx("YRBS Masterpiece.xlsx", sheet = "ROI - All")
+  
+  # Select necessary columns from the yrbs_masterpiece dataframe
+  yrbs_masterpiece <- yrbs_masterpiece %>%
+    select(ROI_Indicator_Code, Health_Topic, Indicator_Long_Description) %>%
+    sapply(trimws)
+  
+  # Merge the data frames
+  all_var_columns <- merge(all_var_columns, yrbs_masterpiece, 
+                           by.x = "ROI_Indicator_Code",
+                           by.y = "ROI_Indicator_Code",
+                           all.x = TRUE)
+  
+  # Calculate the Unweighted_Denominator
+  denominator <- all_var_columns %>%
+    group_by(ROI_Indicator_Code, Year, School_Type) %>%
+    summarize(Unweighted_Denominator = sum(unweighted_numerator_1 + unweighted_numerator_2), .groups = "drop")
+  
+  # Join this back to the original data frame
+  all_var_columns <- all_var_columns %>%
+    left_join(denominator, by = c("ROI_Indicator_Code"))
+  
+  # Process and calculate metrics
+  all_var_columns <- all_var_columns %>%
+    filter(`get(elements)` == "1") %>%
+    mutate(Race_HispLat = race_hisplat) %>%
+    select(-4, -6) %>%
+    rename(
+      Prevalence_Estimate = wt.mean,
+      Confidence_Interval_Low = wt.mean_low,
+      Confidence_Interval_High = wt.mean_upp,
+      Unweighted_Numerator = unweighted_numerator_1,
+      Survey_Year = Year.x,
+      School_Type = School_Type.x
+    ) %>%
+    select(
+      Survey_Year,
+      School_Type,
+      Health_Topic,
+      ROI_Indicator_Code,
+      Indicator_Long_Description,
+      Race_HispLat,
+      Prevalence_Estimate,
+      Confidence_Interval_Low,
+      Confidence_Interval_High,
+      Unweighted_Numerator,
+      Unweighted_Denominator,
+      everything()
+    ) %>%
+    arrange(Health_Topic, ROI_Indicator_Code) %>%
+    mutate(
+      Prevalence_Estimate = round(Prevalence_Estimate * 100, 3),
+      Confidence_Interval_Low = round(Confidence_Interval_Low * 100, 3),
+      Confidence_Interval_High = round(Confidence_Interval_High * 100, 3)
+    )
+  
+  # Calculate the Relative Standard Error (RSE)
+  all_var_columns <- all_var_columns %>%
+    mutate(
+      Standard_Error = round((as.numeric(Confidence_Interval_High) - as.numeric(Confidence_Interval_Low)) / (1.95 * 2), 1),
+      Relative_Standard_Error = round((Standard_Error / as.numeric(Prevalence_Estimate)) * 100, 1),
+      Relative_Standard_Error = ifelse(as.numeric(Prevalence_Estimate) == 0, NA, Relative_Standard_Error),
+      RSE_Flag = case_when(
+        Relative_Standard_Error > 50 ~ "Very Unstable",
+        Relative_Standard_Error > 30 ~ "Unstable",
+        TRUE ~ NA_character_)
+    ) %>%
+    select(-Standard_Error)
+  
+  # Apply the combined suppression rules
+  all_var_columns <- suppress_values(all_var_columns)
+  
+  return(all_var_columns)
+}
+
+# List of survey years to process
+survey_years <- c(2003, 2007, 2009, 2011, 2013, 2015, 2017, 2019, 2023)
+
+# Loop through each year and gender
+for (year in survey_years) {
+  assign(paste0("all_var_columns", year, "_HispLat"), perform_analysis("Hispanic/Latino", year))
+  assign(paste0("all_var_columns", year, "_nonhisplat"), perform_analysis("Non Hisp/Lat", year))
+}
+
+
+
+head(all_var_columns2003_HispLat)
+head(all_var_columns2003_nonhisplat)
+
+head(all_var_columns2007_HispLat)
+head(all_var_columns2007_nonhisplat)
+
+head(all_var_columns2009_HispLat)
+head(all_var_columns2009_nonhisplat)
+
+head(all_var_columns2011_HispLat)
+head(all_var_columns2011_nonhisplat)
+
+head(all_var_columns2013_HispLat)
+head(all_var_columns2013_nonhisplat)
+
+head(all_var_columns2015_HispLat)
+head(all_var_columns2015_nonhisplat)
+
+head(all_var_columns2017_HispLat)
+head(all_var_columns2017_nonhisplat)
+
+head(all_var_columns2019_HispLat)
+head(all_var_columns2019_nonhisplat)
+
+head(all_var_columns2023_HispLat)
+head(all_var_columns2023_nonhisplat)
+
+
+
+# Combine all years into one data frame
+all_years_combined <- bind_rows(
+all_var_columns2003_HispLat,
+all_var_columns2003_nonhisplat,
+
+all_var_columns2007_HispLat,
+all_var_columns2007_nonhisplat,
+
+all_var_columns2009_HispLat,
+all_var_columns2009_nonhisplat,
+
+all_var_columns2011_HispLat,
+all_var_columns2011_nonhisplat,
+
+all_var_columns2013_HispLat,
+all_var_columns2013_nonhisplat,
+
+all_var_columns2015_HispLat,
+all_var_columns2015_nonhisplat,
+
+all_var_columns2017_HispLat,
+all_var_columns2017_nonhisplat,
+
+all_var_columns2019_HispLat,
+all_var_columns2019_nonhisplat,
+
+all_var_columns2023_HispLat,
+all_var_columns2023_nonhisplat,
+)
+
+# Remove duplicate rows
+all_years_combined <- all_years_combined %>% distinct()
+
+# Modify Prevalence_Estimate values and apply additional suppression
+all_years_combined <- all_years_combined %>%
+  mutate(
+    Prevalence_Estimate = case_when(
+      Prevalence_Estimate == "Suppressed" ~ Prevalence_Estimate,
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) <= 2 ~ "2.0",
+      !is.na(map_dbl(Prevalence_Estimate, safe_as_numeric)) & map_dbl(Prevalence_Estimate, safe_as_numeric) >= 98 ~ "98.0",
+      TRUE ~ Prevalence_Estimate
+    ),
+    Confidence_Interval_Low = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_Low)),
+    Confidence_Interval_High = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Confidence_Interval_High)),
+    Unweighted_Numerator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Numerator)),
+    Unweighted_Denominator = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Unweighted_Denominator)),
+    Relative_Standard_Error = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(Relative_Standard_Error)),
+    RSE_Flag = if_else(Prevalence_Estimate == "2.0" | Prevalence_Estimate == "98.0", "Suppressed", as.character(RSE_Flag))
+  ) %>%
+  select(-Year.y,
+         -School_Type.y) %>%
+  rename(Trend_Category = Race_HispLat) %>%
+  mutate(Trend_Grouping = "Race_HispLat") %>%
+  select(Survey_Year, 
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate,
+         Confidence_Interval_Low,
+         Confidence_Interval_High,
+         Unweighted_Numerator,
+         Unweighted_Denominator,
+         Relative_Standard_Error,
+         RSE_Flag
+         ) %>%
+  arrange(Survey_Year,
+          Health_Topic,
+          ROI_Indicator_Code)
+
+  
+
+head(all_years_combined)
+
+
+
+
+# Load an existing workbook
+wb <- loadWorkbook("yrbs_master_analysis_statewide_trad.xlsx")
+
+# Add sheets to the workbook
+addWorksheet(wb, "By Race_HispLat")
+addWorksheet(wb, "Race_HispLat Trend")
+
+# Write data to the "By Sex" sheet
+writeData(wb, sheet = "By Race_HispLat", all_years_combined, na.string = "Suppressed")
+
+# Reshape the data for the trend analysis without altering suppression status
+trend_table <- all_years_combined %>%
+  select(Survey_Year,
+         School_Type,
+         Health_Topic, 
+         ROI_Indicator_Code, 
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         Prevalence_Estimate, 
+         ) %>%
+  pivot_wider(names_from = Survey_Year, values_from = Prevalence_Estimate)
+
+# Add empty columns for 2005 and 2021
+trend_table$`2005` <- NA
+trend_table$`2021` <- NA
+
+# Reorder columns to maintain chronological order
+ordered_years_cols <- c(
+  "2003",
+  "2005",
+  "2007",
+  "2009", 
+  "2011", 
+  "2013", 
+  "2015", 
+  "2017", 
+  "2019", 
+  "2021",
+  "2023"
+)
+
+trend_table <- trend_table %>%
+  select(School_Type, 
+         Health_Topic, 
+         ROI_Indicator_Code,
+         Indicator_Long_Description,
+         Trend_Grouping,
+         Trend_Category,
+         all_of(ordered_years_cols)) %>%
+  arrange(Health_Topic, ROI_Indicator_Code)
+
+# Write the trend_table dataframe to the "Overall Trend" sheet
+writeData(wb, sheet = "Race_HispLat Trend", trend_table, na.string = "")
+
+# Save the workbook
+saveWorkbook(wb, "yrbs_master_analysis_statewide_trad.xlsx", overwrite = TRUE)
+```
