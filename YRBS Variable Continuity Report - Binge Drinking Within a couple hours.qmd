@@ -1,0 +1,314 @@
+---
+title: "Variable Continuity Report"
+author: "Carly Adams, MS"
+date: "`r Sys.Date()`"
+format:
+  html:
+    theme: lumen  # Try different themes: flatly, lumen, united, etc.
+    self-contained: false  # Prevents missing graphs
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load required libraries
+library(survey)
+library(srvyr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(openxlsx)
+library(knitr)
+
+```
+
+## Introduction
+
+This analysis examines whether the survey question represented by V228 in 2019 and 2023 is consistent enough to be trended across survey years given the changes in wording in the question.
+
+**2019 Question:**\
+*"*During the past 30 days, on how many days did you have 4 or more drinks of alcohol in a row (if you are female) or 5 or more drinks of alcohol in a row (if you are male)?*"*
+
+**2023 Question:**\
+*"*During the past 30 days, on how many days did you have 4 or more drinks of alcohol in a row, [**that is, within a couple of hours**]{.underline} (if you are female) or 5 or more drinks of alcohol in a row, [**that is, within a couple of hours**]{.underline} (if you are male)?*."*
+
+The key change is the addition of the phrase **"within a couple of hours."** This may impact how respondents interpret and answer the question, potentially making it more explicit that binge drinking is defined within a **shorter time period** rather than **over an entire day**.
+
+## Data Import and Recoding
+
+```{r import-data}
+
+# Load raw data
+raw_data <- read.xlsx("raw_yrbs_allyears_statewide.xlsx")
+
+# Recode Responses for Consistency
+filtered_data_raw <- raw_data %>%
+  mutate(Response = case_when(
+    Survey_Year == 2019 & V228 == 1 ~ "0 days",
+    Survey_Year == 2019 & V228 == 2 ~ "1-2 days",
+    Survey_Year == 2019 & V228 == 3 ~ "3-5 days",
+    Survey_Year == 2019 & V228 == 4 ~ "6-9 days",
+    Survey_Year == 2019 & V228 == 5 ~ "10-19 days",
+    Survey_Year == 2019 & V228 == 6 ~ "20-29 days",
+    Survey_Year == 2019 & V228 == 7 ~ "All 30 days",
+    Survey_Year == 2023 & V228 == 1 ~ "0 days",
+    Survey_Year == 2023 & V228 == 2 ~ "1-2 days",
+    Survey_Year == 2023 & V228 == 3 ~ "3-5 days",
+    Survey_Year == 2023 & V228 == 4 ~ "6-9 days",
+    Survey_Year == 2023 & V228 == 5 ~ "10-19 days",
+    Survey_Year == 2023 & V228 == 6 ~ "20-29 days",
+    Survey_Year == 2023 & V228 == 7 ~ "All 30 days",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(Response))
+```
+
+### **Interpretation:**
+
+The response options for 2023 were reordered from 2019. This step ensures comparability by aligning them before analysis and easier for visualization.
+
+------------------------------------------------------------------------
+
+## YRBS Complex Survey Design Setup
+
+```{r survey-design}
+# Define YRBS complex survey design
+survey_design <- filtered_data_raw %>%
+  as_survey_design(
+    ids = Primary_Samp_Unit,
+    strata = Stratum,
+    weights = Final_Weight,
+    nest = TRUE
+  )
+```
+
+### **Interpretation:**
+
+The dataset is now structured with survey weights, stratification, and PSU identifiers to maintain appropriate variance estimation.
+
+------------------------------------------------------------------------
+
+## Prevalence Estimates and Visualization
+
+```{r prevalence-estimates}
+
+# Calculate prevalence estimates
+prevalence_results <- survey_design %>%
+  group_by(Survey_Year, Response) %>%
+  summarise(
+    Prevalence = survey_mean(na.rm = TRUE,
+                             proportion = TRUE,
+                             prop_method = "logit", 
+                             vartype = "ci"),
+    Numerator = sum(Response == Response, na.rm = TRUE),
+    Denominator = sum(!is.na(Response), na.rm = TRUE)
+  ) %>%
+  rename(
+    `CI Low` = Prevalence_low,
+    `CI High` = Prevalence_upp
+  ) %>%
+  mutate(
+    Prevalence = round(Prevalence * 100, 1),
+    `CI Low` = round(`CI Low` * 100, 1),
+    `CI High` = round(`CI High` * 100, 1)
+  )
+
+```
+
+```{r plot-prevalence, fig.height=5, fig.width=7}
+
+ggplot(prevalence_results, aes(x = factor(Response, 
+                                          levels = c(
+    "0 days",
+    "1-2 days",
+    "3-5 days",
+    "6-9 days",
+    "10-19 days",
+    "20-29 days",
+    "All 30 days"
+  )),  
+y = Prevalence, 
+fill = factor(Survey_Year, levels = c(2019, 2023)))) +  
+  geom_bar(stat = "identity", position =
+             position_dodge(width = 0.9)) +  
+  geom_errorbar(aes(ymin = `CI Low`, ymax = `CI High`), 
+                width = 0.2, position = 
+                  position_dodge(width = 0.9)) +  
+  scale_fill_manual(values = c("2019" = "#F8766D", 
+                               "2023" = "#00BFC4")) +  
+  labs(title = "Addition of 'within a couple of hours' words - 
+       Response Distributions (2019 vs 2023)",
+       x = "Response Options",
+       y = "Prevalence Estimate (%)",
+       fill = "Survey Year") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, 
+                                  size = 14,   
+                                  face = "bold")) +
+  coord_flip()
+```
+
+### **Interpretation:**
+
+The bar chart displays prevalence estimates for each response category in 2019 and 2023, accounting for survey weights. The overall distribution **appears similar** between the two years, with no drastic shifts in prevalence estimates.
+
+------------------------------------------------------------------------
+
+## Rao-Scott Chi-Square Test
+
+The **Rao-Scott Chi-Square test** was selected for statistical significance testing in this analysis because it accounts for the **complex survey design** of the YRBS data. The **Centers for Disease Control and Prevention (CDC) also uses this method** when analyzing YRBS data, as it properly adjusts for **stratification, clustering, and survey weights**—all critical factors in obtaining valid results.
+
+The Rao-Scott test **corrects for the design effects** present in the YRBS, ensuring accurate significance testing even when **sample sizes vary between survey years**. Given these considerations, this test provides the most appropriate approach for evaluating variable continuity across survey cycles.
+
+```{r chi-square-test}
+chi_test <- svychisq(~ Response + Survey_Year, survey_design)
+chi_test
+```
+
+### **Interpretation:**
+
+**Test Statistic (F) = 1.5481**
+
+-   This is the adjusted chi-square statistic that tells us **how strong the difference is** between response distributions in 2019 and 2023.
+
+-   A **higher F-value** indicates a **stronger difference**.
+
+-   In general, an F-statistic above **4 or 5** suggests a meaningful difference—**1.5481 is relatively low**, meaning the response distributions **do not significantly differ** between the two years.
+
+**Numerator Degrees of Freedom (ndf) = 5.4043**
+
+-   This reflects the **number of independent comparisons** being made while adjusting for the survey design.
+
+-   Because of weighting and clustering, the effective degrees of freedom is slightly fractional rather than a whole number.
+
+**Denominator Degrees of Freedom (ddf) = 648.5177**
+
+-   This represents the **available information for statistical inference**, adjusted for the survey design.
+
+-   A **higher ddf (e.g., \>100)** means that the test has **a strong basis for detecting real differences** rather than random noise.
+
+**p-value = 0.1675**
+
+-   This is **greater than 0.05**, meaning the probability of observing these differences **by random chance alone is relatively high**.
+
+-   A typical threshold for significance is **0.05**—our result is **above this threshold**, confirming **that the differences are not statistically significant**.
+
+This suggests that **the addition of "within a couple of hours" did not lead to a substantial shift in how respondents answered the question**, and the responses remain comparable across the years.
+
+## Logistic Regression Results
+
+The **logistic regression model** was used to check if responses in **2023 were significantly different from those in 2019**. The model predicts response patterns based on the survey year while accounting for the **survey design (weights, clustering, stratification)**.
+
+```{r ordinal-logit}
+
+# Convert Response to an ordered factor
+survey_design <- survey_design %>%
+  mutate(Response = factor(Response, levels = c(
+    "0 days",
+    "1-2 days",
+    "3-5 days",
+    "6-9 days",
+    "10-19 days",
+    "20-29 days",
+    "All 30 days"
+    ), ordered = TRUE))
+
+
+logit_model <- svyglm(as.numeric(Response) ~ factor(Survey_Year), 
+                      design = survey_design, 
+                      family = quasipoisson(link = "log"))
+
+summary(logit_model)
+```
+
+### **Interpretation:**
+
+**Estimate (-0.04800)** – This tells us the **direction and size of the difference** between 2019 and 2023 responses.
+
+-   A **positive value** means that, on average, responses were slightly **higher in 2023 than in 2019** (i.e., students were more likely to choose a response further down the scale). This would indicate a **higher protective outcome**.
+
+-   Since the estimate is **negative**, it suggests that **students were slightly less likely to report higher drinking frequency in 2023 compared to 2019**.
+
+-   However, the difference is small and **not statistically significant**.
+
+**Standard Error (0.03222)** – This measures **how precise** the estimate is.
+
+-   The **standard error (SE)** tells us **how much variation** there is in our estimate due to sampling. It shows how precise our results are.
+
+-   Since this value is **relatively low**, it means that **our estimate is precise** and **unlikely to vary much if we repeated the survey**.
+
+-   If the SE were **greater than 0.1 or 0.2**, it would indicate a **much higher level of uncertainty**, making the estimate less reliable.
+
+**p-value (0.139)**
+
+-   This tells us **if the difference between 2019 and 2023 is real or just due to random chance**.
+
+-   A **very small p-value (less than 0.05)** means that the difference is **statistically significant**—it is **unlikely to have happened by chance**.
+
+-   Here, **0.139 is above the threshold of 0.05**, meaning that the difference is **not statistically significant**.
+
+### **What This Means for Our Data**
+
+-   **Responses did not change significantly** between 2019 and 2023.
+
+-   The shift is **likely due to random variation** rather than a real difference in interpretation or response behavior.
+
+-   This confirms that **V228 (2019) and V228 (2023) should remain trended together**.
+
+By using this model, we ensure that **our decision to keep the same V-code is appropriate** and that we are not misrepresenting trends in the data.
+
+------------------------------------------------------------------------
+
+## Subgroup Analysis
+
+Chi-square tests were conducted separately within demographic subgroups (Sex, Grade, Race_Group_3) to determine whether differences persisted across populations.
+
+```{r}
+# Look at Subgroups Chi Square test
+
+subgroups <- c("Sex", "Grade", "Race_Group_3")
+subgroup_results <- list()
+
+for (subgroup in subgroups) {
+  filtered_data <- filtered_data_raw %>% 
+    filter(!is.na(!!sym(subgroup)))  
+  subgroup_survey_design <- filtered_data %>%
+    as_survey_design(
+      ids = Primary_Samp_Unit,
+      strata = Stratum,
+      weights = Final_Weight,
+      nest = TRUE
+    )
+  chi_test <- svychisq(
+    as.formula(paste("~ Response + Survey_Year")), subgroup_survey_design)
+  subgroup_results[[subgroup]] <- chi_test
+}
+
+# Print results
+subgroup_results
+```
+
+### **Interpretation:**
+
+| Subgroup     | F-statistic | df     | p-value |
+|--------------|-------------|--------|---------|
+| Sex          | 1.3759      | 5.4148 | 0.2274  |
+| Grade        | 1.571       | 5.4032 | 0.1607  |
+| Race_Group_3 | 1.3318      | 5.3763 | 0.2457  |
+
+-   Since **none of the p-values are below 0.05**, there is no significant variation across subgroups.
+
+-   This means that the addition of "within a couple of hours" **did not have a differential impact** based on sex, grade, or race.
+
+## Conclusion
+
+-   The **Chi-Square and Logistic Regression** models show **no significant differences** between 2019 and 2023 responses.
+
+-   These findings remain consistent across **sex, grade, and race** subgroups.
+
+-   This suggests that **V228 (2019) and V228 (2023) can be trended together** without the need for a new V-code.
+
+-   The change in wording does not appear to have altered how students interpreted or responded to the question.
+
+Thus, the addition of "within a couple of hours" **does not warrant breaking the trend**, and responses remain comparable across years.
